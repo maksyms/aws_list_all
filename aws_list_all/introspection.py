@@ -2,12 +2,12 @@ from __future__ import print_function
 
 import re
 from collections import defaultdict
-from json import load
+from json import load, dump
 from multiprocessing.pool import ThreadPool
 from socket import gethostbyname
 
 import boto3
-from pkg_resources import resource_stream
+from pkg_resources import resource_stream, resource_filename
 
 from app_json_file_cache import AppCache
 
@@ -196,7 +196,7 @@ NOT_RESOURCE_DESCRIPTIONS = {
         'DescribeAccountAttributes', 'DescribeDBEngineVersions', 'DescribeReservedDBInstancesOfferings',
         'DescribeEvents'
     ],
-    'resourcegroupstaggingapi': ['GetResources', 'GetTagKeys'],
+    'resourcegroupstaggingapi': ['GetResources', 'GetTagKeys', 'DescribeReportCreation', 'GetComplianceSummary'],
     'route53': ['GetTrafficPolicyInstanceCount', 'GetHostedZoneCount', 'GetHealthCheckCount', 'GetGeoLocation'],
     'route53domains': ['ListOperations'],
     'sagemaker': ['ListTrainingJobs'],
@@ -238,7 +238,10 @@ PARAMETERS_REQUIRED = {
     'gamelift': ['DescribeGameSessionDetails', 'DescribeGameSessions', 'DescribePlayerSessions'],
     'globalaccelerator': ['DescribeAcceleratorAttributes'],
     'glue': ['GetDataflowGraph', 'GetResourcePolicy'],
-    'health': ['DescribeEventTypes', 'DescribeEntityAggregates', 'DescribeEvents'],
+    'health': [
+        'DescribeEventTypes', 'DescribeEntityAggregates', 'DescribeEvents', 'DescribeEventsForOrganization',
+        'DescribeHealthServiceStatusForOrganization'
+    ],
     'iot': ['GetLoggingOptions', 'GetEffectivePolicies', 'ListAuditFindings'],
     'kinesis': ['DescribeStreamConsumer', 'ListShards'],
     'kinesisvideo': ['DescribeStream', 'ListTagsForStream'],
@@ -288,7 +291,7 @@ def get_listing_operations(service, region=None, selected_operations=()):
             continue
         op_model = client.meta.service_model.operation_model(operation)
         required_members = op_model.input_shape.required_members if op_model.input_shape else []
-        required_members = [m for m in required_members if m != "MaxResults"]
+        required_members = [m for m in required_members if m != 'MaxResults']
         if required_members:
             continue
         if operation in PARAMETERS_REQUIRED.get(service, []):
@@ -305,28 +308,42 @@ def get_listing_operations(service, region=None, selected_operations=()):
     return operations
 
 
-def recreate_caches():
+def recreate_caches(update_packaged_values):
     get_endpoint_hosts.recalculate()
     get_service_regions.recalculate()
 
+    if update_packaged_values:
+        print('Updating packaged values at:')
+
+        endpoint_hosts_packaged_json = resource_filename(__package__, 'endpoint_hosts.json')
+        print(' *', endpoint_hosts_packaged_json)
+        dump(get_endpoint_hosts(), open(endpoint_hosts_packaged_json, 'w'))
+
+        service_regions_packaged_json = resource_filename(__package__, 'service_regions.json')
+        print(' *', service_regions_packaged_json)
+        dump(get_service_regions(), open(service_regions_packaged_json, 'w'))
+
 
 def packaged_endpoint_hosts():
-    return load(resource_stream(__package__, 'endpoint_hosts.json'))['data']
+    return load(resource_stream(__package__, 'endpoint_hosts.json'))
 
 
 @cache('endpoint_hosts', vary={'boto3_version': boto3.__version__}, cheap_default_func=packaged_endpoint_hosts)
 def get_endpoint_hosts():
     print('Extracting endpoint list from boto3 version {} ...'.format(boto3.__version__))
+
     EC2_REGIONS = set(boto3.Session().get_available_regions('ec2'))
     S3_REGIONS = set(boto3.Session().get_available_regions('s3'))
     ALL_REGIONS = sorted(EC2_REGIONS | S3_REGIONS)
     ALL_SERVICES = get_services()
-    result = {
-        service:
-        {region: boto3.Session(region_name=region).client(service).meta.endpoint_url
-         for region in ALL_REGIONS}
-        for service in ALL_SERVICES
-    }
+
+    result = {}
+    for service in ALL_SERVICES:
+        print('  ...looking for {} in all regions...'.format(service))
+        result[service] = {}
+        for region in ALL_REGIONS:
+            result[service][region] = boto3.Session(region_name=region).client(service).meta.endpoint_url
+
     print('...done.')
     return result
 
@@ -352,7 +369,7 @@ def get_service_region_ip_in_dns():
 
 
 def packaged_service_regions():
-    return load(resource_stream(__package__, 'service_regions.json'))['data']
+    return load(resource_stream(__package__, 'service_regions.json'))
 
 
 @cache('service_regions', vary={'boto3_version': boto3.__version__}, cheap_default_func=packaged_service_regions)
